@@ -2,7 +2,8 @@ mod main_test;
 
 use std::borrow::Borrow;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::clone;
+use std::collections::{HashSet, BTreeSet};
 use std::fmt::{format, Formatter};
 use std::io::Read;
 use std::iter::zip;
@@ -10,39 +11,15 @@ use std::num::NonZeroU8;
 use std::ops::DerefMut;
 use std::rc::Rc;
 
-/*#[derive(Debug)]
-struct Cell {
-    value: Option<u8>,
-    possible: Vec<u8>
-}
-
-impl Cell {
-    pub fn new() -> Self {
-        Self {
-            value: None,
-            possible: vec![1,2,3,4,5,6,7,8,9],
-        }
-    }
-    pub fn set_value(&mut self, v: u8) {
-        if let Some(v_old) = self.value {
-            self.possible.push(v_old);
-        }
-        self.value = Some(v);
-    }
-}*/
-
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Hash, Eq)]
 enum Cell {
     Value(u8),
-    Possibilities(HashSet<u8>)
+    Possibilities(BTreeSet<u8>)
 }
 
 #[derive(Debug)]
 struct Board {
     board: [Cell;81],
-    /*pub row_board: [&'a RefCell<Cell>; 81],
-    pub col_board: [&'a RefCell<Cell>; 81],
-    pub field_board: [&'a RefCell<Cell>; 81]*/
 }
 
 fn calculate_field_index(i: usize) -> usize {
@@ -58,7 +35,7 @@ impl Board {
     pub fn new() -> Self {
         let mut board: Vec<Cell> = vec![];
         for i in 0..81 {
-            board.push(Cell::Possibilities(HashSet::from_iter(1..10)));
+            board.push(Cell::Possibilities(BTreeSet::from_iter(1..10)));
         }
         Self {
             board: board.try_into().unwrap(),
@@ -87,7 +64,7 @@ impl Board {
         (0..9).map(move |u| col_offset + u*9)
     }
 
-    fn get_field_indizi_by_start_index(&self, field_start_idx: usize) -> impl Iterator<Item=usize> {
+    fn get_field_indizi_by_start_index(&self, field_start_idx: usize) -> impl Iterator<Item=usize> + Clone {
         (0..9).map(move |u| {
             let field_column = u % 3;
             let field_row = u / 3;
@@ -134,7 +111,7 @@ impl Board {
             let indizi = self.get_field_indizi_by_start_index(field_start_idx).collect::<Vec<_>>();
             for idx1 in &indizi {
                 if let Cell::Possibilities(ref poss1) = self.board[*idx1] {
-                    let mut other_possibilities = HashSet::new();
+                    let mut other_possibilities = BTreeSet::new();
                     for idx2 in &indizi {
                         if idx1 != idx2 {
                             if let Cell::Possibilities(ref poss2) = self.board[*idx2] {
@@ -153,7 +130,7 @@ impl Board {
         found
     }
 
-    fn handle_naked_pairs(&mut self,idx: usize, idx_to_check:usize,poss1: HashSet<u8>, to_change_iter: impl Iterator<Item=usize>) -> Option<(HashSet<u8>, Vec<usize>)> {
+    /*fn handle_naked_pairs(&mut self,idx: usize, idx_to_check:usize,poss1: HashSet<u8>, to_change_iter: impl Iterator<Item=usize>) -> Option<(HashSet<u8>, Vec<usize>)> {
         if let Cell::Possibilities(ref poss_check) = self.board[idx_to_check] {
             if &poss1 == poss_check {
                 let to_change_idx = to_change_iter
@@ -163,38 +140,30 @@ impl Board {
             }
         }
         return None;
-    }
+    }*/
 
-    pub fn naked_pairs(&mut self) {
-
-        let mut to_change: Vec<(HashSet<u8>, Vec<usize>)> = vec![];
-        'outer: for idx in 0..81 {
-            if let Cell::Possibilities(ref poss1) = self.board[idx] {
-
-                if poss1.len() == 2 {
-                    for idx_to_check in self.get_row_indizi(idx) {
-                        if let Some(c) = self.handle_naked_pairs(idx, idx_to_check,poss1.clone(), self.get_row_indizi(idx)) {
-                            to_change.push( c);
-                        }
+    fn naked<T>(&mut self, idx: T) -> bool where T: Iterator<Item = usize> + Clone  {
+        use itertools::Itertools;
+        let mut to_change: Vec<(BTreeSet<u8>, Vec<usize>)> = vec![];
+        for n in 2..5 {
+            for cells in idx.clone().map(|i| &self.board[i]).permutations(n).unique() {
+                let is_nothing_set = cells.iter().all(|c| match c {
+                    Cell::Possibilities(_) => true,
+                    _ => false
+                });
+                if is_nothing_set {
+                    let intersection = cells.iter().filter_map(|c| match c {
+                        Cell::Possibilities(set) => Some(set.clone()),
+                        _ => None
+                    }).reduce(|acc, item| acc.union(&item).map(|i| *i).collect()).unwrap();
+                    if intersection.len() == n {
+                        let res = idx.clone().filter(|i| !cells.contains(&&self.board[*i])).collect::<Vec<_>>();
+                        to_change.push((intersection, res));
                     }
-
-                    for idx_to_check in self.get_col_indizi(idx) {
-                        if let Some(c) = self.handle_naked_pairs(idx, idx_to_check,poss1.clone(), self.get_col_indizi(idx)) {
-                            to_change.push(c);
-                        }
-                    }
-
-                    for idx_to_check in self.get_field_indizi(idx) {
-                        if let Some(c) = self.handle_naked_pairs(idx, idx_to_check, poss1.clone(), self.get_field_indizi(idx)) {
-                            to_change.push(c);
-                        }
-                    }
-
-
                 }
             }
         }
-
+        let result = to_change.len() > 0;
         for (values, indizi) in &to_change {
             for i in indizi {
                 if let Cell::Possibilities(ref mut p) = &mut self.board[*i] {
@@ -204,6 +173,17 @@ impl Board {
                 }
             }
         }
+        result
+    }
+
+    pub fn naked_pairs(&mut self) -> bool {
+        let mut res = false;
+        for i in 0..9 {
+            res |= self.naked((0..9).map(move |u| i*9 + u));
+            res |= self.naked((0..9).map(move |u| i + u*9));
+            res |= self.naked(self.get_field_indizi_by_start_index(i));
+        }
+        res
     }
 }
 
@@ -233,8 +213,6 @@ impl std::fmt::Display for Board {
 fn main() {
     let mut board = Board::new();
     board.load_sudoku("309000400200709000087000000750060230600904008028050041000000590000106007006000104");
-    dbg!(&board.board[4]);
-
     loop {
         let mut res = false;
         res |= board.check_solved_cells();
@@ -243,13 +221,12 @@ fn main() {
         }
 
         if !res {
-            board.naked_pairs();
-            res |= board.check_solved_cells();
+            res |= board.naked_pairs();
         }
 
         if !res {
             break;
         }
     }
-    println!("{}", board);
+    println!("\n{}", board);
 }
